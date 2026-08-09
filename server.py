@@ -1,6 +1,6 @@
 """Content Tracker - HTTP server, JSON API and Instagram publish orchestration.
 
-Runs on the Python standard library alone apart from pymongo. Start it with:
+Runs on the Python standard library alone apart from PyMySQL. Start it with:
 
     ./run.sh          (or)          python3 server.py
 
@@ -388,9 +388,10 @@ def main():
     try:
         STORE, STORE_NOTE = store_module.build_store()
     except Exception as exc:  # noqa: BLE001
-        print(f"\n  Could not connect to MongoDB: {exc}\n")
-        print("  Check MONGODB_URI in .env, and that this machine's IP is on the")
-        print("  Atlas Network Access allowlist.\n")
+        print(f"\n  Could not connect to MySQL: {exc}\n")
+        print("  Check MYSQL_* in .env. On Hostinger the usual cause is that this")
+        print("  machine's IP is not on the hPanel -> Databases -> Remote MySQL")
+        print("  allowlist, which shows up as a connection timeout.\n")
         raise SystemExit(1)
 
     print("\n  Content Tracker")

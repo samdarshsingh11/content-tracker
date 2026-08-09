@@ -10,7 +10,7 @@ connector built on the Meta Graph API.
 - **Publish**: one button per item posts the edited cut straight to Instagram and
   writes the permalink back onto the row.
 
-Backend is Python (standard library + `pymongo`). Frontend is plain HTML/CSS/JS —
+Backend is Python (standard library + `PyMySQL`). Frontend is plain HTML/CSS/JS —
 no build step, no bundler. There is no Node.js on this machine and none is needed.
 
 ---
@@ -21,40 +21,55 @@ no build step, no bundler. There is no Node.js on this machine and none is neede
 cd "content-tracker" && ./run.sh
 ```
 
-First run creates `.venv`, installs `pymongo`, and copies `.env.example` → `.env`.
+First run creates `.venv`, installs `PyMySQL`, and copies `.env.example` → `.env`.
 Fill in `.env`, run it again, then open <http://127.0.0.1:8787>.
 
-Without `MONGODB_URI` the app still runs, on a **volatile in-memory store** — the
-UI shows an amber banner and nothing is saved. That mode exists so you can look
-around before wiring the database up.
+Without the `MYSQL_*` values the app still runs, on a **volatile in-memory store**
+— the UI shows an amber banner and nothing is saved. That mode exists so you can
+look around before wiring the database up.
 
 ---
 
 ## What I need from you
 
-Four values, all of which go into `.env` on your machine. **Do not paste them into
+Five values, all of which go into `.env` on your machine. **Do not paste them into
 a chat, a ticket, or a screenshot** — a leaked Instagram token can post to your
-account.
+account, and a leaked database password gives write access to everything else on
+that Hostinger plan.
 
 | Value | Where it comes from |
 | --- | --- |
-| `MONGODB_URI` | Atlas → Database → Connect → Drivers. Or `mongodb://127.0.0.1:27017` for a local server. |
+| `MYSQL_HOST`, `MYSQL_USER`, `MYSQL_PASSWORD`, `MYSQL_DB` | Hostinger hPanel → Databases (see below). |
 | `IG_USER_ID` | Your Instagram **Business account id** (see below). Not your @handle. |
 | `IG_ACCESS_TOKEN` | A long-lived Page access token (see below). |
 | `META_APP_SECRET` | developers.facebook.com → your app → Settings → Basic. Optional but recommended. |
 
-### 1 · MongoDB
+### 1 · MySQL on Hostinger
 
-Atlas free tier (M0) is enough. Two things trip people up:
+1. **hPanel → Databases → Management → Create New MySQL Database.** Note the
+   database name and username it assigns — Hostinger prefixes both with your
+   account id, e.g. `u123456789_tracker` / `u123456789_admin`. Set a password
+   there (not one you're reusing elsewhere).
+2. **hPanel → Databases → Remote MySQL → add this Mac's IP.** This is the step
+   almost everyone misses: by default the database only accepts connections
+   from Hostinger's own servers, and a connection from your laptop just hangs
+   until it times out, with no clearer error than that. If your ISP gives you a
+   new IP periodically, you'll redo this.
+3. The **host** for `MYSQL_HOST` is on that same Remote MySQL page — usually the
+   server's hostname or an IP, *not* `localhost`. `localhost` only resolves
+   correctly for code running on Hostinger's own server, which this app is not
+   (it runs on your Mac, or wherever you deploy it).
 
-- **Network Access** — add your current IP to the allowlist, or the driver hangs
-  and then times out. If your IP changes, this breaks and the symptom is a
-  connection timeout with no other explanation.
-- **Password encoding** — if the DB password contains `@ : / ? # [ ]`, percent-encode
-  those characters inside the URI, or the connection string parses wrong.
+The app creates its table (`content_items` by default, via `MYSQL_TABLE`) the
+first time it connects, using `CREATE TABLE IF NOT EXISTS`. It never runs
+`CREATE DATABASE` — on shared hosting the database itself is made in hPanel, and
+the account typically doesn't have that grant anyway. It also never drops or
+alters an existing table, so re-running it against a table you already have is
+safe.
 
-The app creates the database, collection and indexes on first connect. Nothing to
-set up by hand.
+**If you'd rather run the app on Hostinger itself** (a VPS plan with Python, or
+in a subprocess Cloud Startup can run), point `MYSQL_HOST` at `localhost` instead
+and skip the Remote MySQL allowlist entirely — everything else is unchanged.
 
 ### 2 · Instagram prerequisites
 
@@ -180,13 +195,20 @@ Instagram removed standalone feed video posts, so this is the real equivalent.
 - **Uploads.** The tracker stores URLs; it does not host files. If you want to
   drag a video into the tracker and have it become a public URL, that needs an
   upload target (Cloudinary or S3) wiring in.
+- **Connections and shared hosting.** Each request thread keeps its own MySQL
+  connection and pings/reconnects before use, because shared hosts (Hostinger
+  included) close idle connections well before the app would otherwise notice —
+  the old symptom would be a `MySQL server has gone away` error mid-request.
+  Hostinger Cloud Startup's own MySQL connection cap is modest; this app opens
+  at most one connection per concurrent request, which fits comfortably under it
+  for a small team.
 
 ## Files
 
 ```
 server.py          HTTP server, JSON API, publish job runner
 meta_api.py        Meta Graph API connector (the whole Instagram integration)
-store.py           MongoDB access, validation, in-memory fallback
+store.py           MySQL access, validation, in-memory fallback
 config.py          .env loading
 web/index.html     markup
 web/app.css        design tokens + styles (dark and light)

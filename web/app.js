@@ -488,7 +488,7 @@ async function loadConnection() {
   state.config = config;
 
   $("#brandBackend").textContent =
-    config.backend === "mongodb" ? `mongodb · ${config.mongo_db}` : "in-memory (not saved)";
+    config.backend === "mysql" ? `mysql · ${config.db_name}` : "in-memory (not saved)";
 
   const banner = $("#storeBanner");
   if (config.backend_note) {

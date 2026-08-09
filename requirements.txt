@@ -1,2 +1,1 @@
-pymongo>=4.6
-dnspython>=2.4
+PyMySQL>=1.1

@@ -42,10 +42,17 @@ def _get(name: str, default: str = "") -> str:
 HOST = _get("HOST", "127.0.0.1")
 PORT = int(_get("PORT", "8787"))
 
-# --- MongoDB ----------------------------------------------------------------
-MONGODB_URI = _get("MONGODB_URI")
-MONGODB_DB = _get("MONGODB_DB", "content_tracker")
-MONGODB_COLLECTION = _get("MONGODB_COLLECTION", "content_items")
+# --- MySQL ------------------------------------------------------------------
+MYSQL_HOST = _get("MYSQL_HOST")
+MYSQL_PORT = int(_get("MYSQL_PORT", "3306"))
+MYSQL_USER = _get("MYSQL_USER")
+MYSQL_PASSWORD = _get("MYSQL_PASSWORD")
+MYSQL_DB = _get("MYSQL_DB")
+MYSQL_TABLE = _get("MYSQL_TABLE", "content_items")
+
+# Hostinger terminates idle MySQL connections fairly aggressively. The store
+# pings and reconnects rather than trusting a long-lived socket.
+MYSQL_CONNECT_TIMEOUT = int(_get("MYSQL_CONNECT_TIMEOUT", "10"))
 
 # --- Meta / Instagram Graph API --------------------------------------------
 # Graph API version. Bump this deliberately; Meta deprecates versions on a
@@ -61,8 +68,8 @@ META_APP_SECRET = _get("META_APP_SECRET")
 PUBLISH_DAILY_LIMIT = int(_get("PUBLISH_DAILY_LIMIT", "25"))
 
 
-def mongo_configured() -> bool:
-    return bool(MONGODB_URI)
+def mysql_configured() -> bool:
+    return bool(MYSQL_HOST and MYSQL_USER and MYSQL_DB)
 
 
 def meta_configured() -> bool:
@@ -76,9 +83,10 @@ def redacted_summary() -> dict:
         return f"...{value[-4:]}" if len(value) > 4 else ""
 
     return {
-        "mongo_configured": mongo_configured(),
-        "mongo_db": MONGODB_DB if mongo_configured() else None,
-        "mongo_collection": MONGODB_COLLECTION if mongo_configured() else None,
+        "db_configured": mysql_configured(),
+        "db_name": MYSQL_DB if mysql_configured() else None,
+        "db_table": MYSQL_TABLE if mysql_configured() else None,
+        "db_host": MYSQL_HOST if mysql_configured() else None,
         "meta_configured": meta_configured(),
         "graph_version": GRAPH_VERSION,
         "ig_user_id": IG_USER_ID or None,

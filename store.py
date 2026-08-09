@@ -2,16 +2,22 @@
 
 Two interchangeable backends behind one interface:
 
-  MongoStore   - the real one, backed by MongoDB (Atlas or self-hosted).
-  MemoryStore  - a throwaway in-process store used only when MONGODB_URI is
-                 blank, so the UI can be explored before Mongo is wired up.
-                 The UI shows a loud banner in this mode. Nothing persists.
+  MySQLStore   - the real one, backed by MySQL/MariaDB (Hostinger hPanel, or
+                 any other MySQL host).
+  MemoryStore  - a throwaway in-process store used only when the MySQL settings
+                 are blank, so the UI can be explored before the database is
+                 wired up. The UI shows a loud banner in this mode. Nothing
+                 persists.
+
+Dates and timestamps cross this boundary as strings ('YYYY-MM-DD' for calendar
+dates, ISO-8601 UTC for timestamps) so that neither the HTTP layer nor the
+frontend has to know which backend is in use.
 """
 
 import re
 import threading
 import uuid
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
 import config
 
@@ -94,7 +100,7 @@ def clean(payload: dict, *, partial: bool) -> dict:
 
 
 def _matches(doc: dict, query: dict) -> bool:
-    """Filter predicate shared by MemoryStore (Mongo does this server-side)."""
+    """Filter predicate for MemoryStore (MySQL does this in the WHERE clause)."""
     if query.get("status") and doc.get("status") != query["status"]:
         return False
     if query.get("content_type") and doc.get("content_type") != query["content_type"]:
@@ -166,95 +172,285 @@ class MemoryStore:
             )
 
 
-class MongoStore:
-    backend = "mongodb"
+# --- MySQL type conversion ---------------------------------------------------
+# The rest of the app speaks strings. MySQL speaks date/datetime. Everything
+# crossing that line goes through these four, and empty string means NULL.
 
-    def __init__(self, uri, db_name, collection_name):
-        from pymongo import ASCENDING, MongoClient
+def _to_date(value):
+    if not value:
+        return None
+    return datetime.strptime(value, "%Y-%m-%d").date()
 
-        self._client = MongoClient(uri, serverSelectionTimeoutMS=8000, appname="content-tracker")
-        self._col = self._client[db_name][collection_name]
-        for field in ("status", "content_type", "date_publish", "created_at"):
-            self._col.create_index([(field, ASCENDING)])
+
+def _from_date(value):
+    if not value:
+        return ""
+    return value.isoformat() if isinstance(value, date) else str(value)
+
+
+def _to_dt(value):
+    """ISO-8601 string -> naive UTC datetime, which is what DATETIME stores."""
+    if not value:
+        return None
+    if isinstance(value, datetime):
+        parsed = value
+    else:
+        parsed = datetime.fromisoformat(value)
+    if parsed.tzinfo is not None:
+        parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
+    return parsed.replace(microsecond=0)
+
+
+def _from_dt(value):
+    if not value:
+        return ""
+    if isinstance(value, str):
+        return value
+    return value.replace(tzinfo=timezone.utc).isoformat(timespec="seconds")
+
+
+DATE_FIELDS = ("date_received", "date_publish")
+DT_FIELDS = ("published_at", "created_at", "updated_at")
+
+COLUMNS = (
+    "content_type", "title", "status", "date_received", "date_publish",
+    "raw_url", "edited_url", "caption", "notes", "owner",
+    "ig_media_id", "ig_permalink", "publish_error", "published_at",
+    "created_at", "updated_at",
+)
+
+# %s and _ are LIKE wildcards; a user searching for "50_off" means the literal.
+LIKE_ESCAPE = str.maketrans({"\\": r"\\", "%": r"\%", "_": r"\_"})
+
+
+class MySQLStore:
+    """MySQL / MariaDB backend.
+
+    Connections are per-thread and re-pinged before use. Shared hosts (Hostinger
+    included) drop idle MySQL connections well before the app would notice, and
+    a stale socket surfaces as a confusing 'server has gone away' mid-request.
+    """
+
+    backend = "mysql"
+
+    def __init__(self, *, host, port, user, password, database, table, connect_timeout=10):
+        import pymysql
+        from pymysql.cursors import DictCursor
+
+        # A table name cannot be a bound parameter, so it is validated as a
+        # bare identifier instead of ever being trusted verbatim.
+        if not re.fullmatch(r"[A-Za-z0-9_]{1,64}", table):
+            raise ValueError(f"Invalid table name: {table!r}")
+
+        self._pymysql = pymysql
+        self._settings = dict(
+            host=host, port=port, user=user, password=password, database=database,
+            charset="utf8mb4",          # emoji in captions need utf8mb4, not utf8
+            autocommit=True,
+            connect_timeout=connect_timeout,
+            cursorclass=DictCursor,
+        )
+        self._table = table
+        self._local = threading.local()
+        self._ensure_schema()
+
+    # -- connection ----------------------------------------------------------
+
+    def _connect(self):
+        return self._pymysql.connect(**self._settings)
+
+    def _conn(self):
+        conn = getattr(self._local, "conn", None)
+        if conn is None:
+            conn = self._connect()
+            self._local.conn = conn
+            return conn
+        try:
+            conn.ping(reconnect=True)
+        except Exception:
+            try:
+                conn.close()
+            except Exception:
+                pass
+            conn = self._connect()
+            self._local.conn = conn
+        return conn
+
+    def _query(self, sql, params=(), *, fetch=None):
+        with self._conn().cursor() as cur:
+            cur.execute(sql, params)
+            if fetch == "one":
+                return cur.fetchone()
+            if fetch == "all":
+                return cur.fetchall()
+            return cur.rowcount, cur.lastrowid
 
     def ping(self):
-        self._client.admin.command("ping")
+        self._conn().ping(reconnect=True)
         return True
 
-    @staticmethod
-    def _out(doc):
-        if not doc:
-            return None
-        doc = dict(doc)
-        doc["id"] = str(doc.pop("_id"))
-        return doc
+    # -- schema --------------------------------------------------------------
+
+    def _ensure_schema(self):
+        """Creates the table if absent. Never drops or alters an existing one.
+
+        CREATE DATABASE is deliberately not attempted - on shared hosting the
+        database is made in the control panel and the user has no such grant.
+        """
+        self._query(f"""
+            CREATE TABLE IF NOT EXISTS `{self._table}` (
+              id            BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+              content_type  VARCHAR(16)  NOT NULL DEFAULT 'reel',
+              title         VARCHAR(200) NOT NULL,
+              status        VARCHAR(16)  NOT NULL DEFAULT 'draft',
+              date_received DATE         NULL,
+              date_publish  DATE         NULL,
+              raw_url       VARCHAR(1024) NOT NULL DEFAULT '',
+              edited_url    VARCHAR(1024) NOT NULL DEFAULT '',
+              caption       TEXT         NULL,
+              notes         TEXT         NULL,
+              owner         VARCHAR(80)  NOT NULL DEFAULT '',
+              ig_media_id   VARCHAR(64)  NOT NULL DEFAULT '',
+              ig_permalink  VARCHAR(512) NOT NULL DEFAULT '',
+              publish_error TEXT         NULL,
+              published_at  DATETIME     NULL,
+              created_at    DATETIME     NOT NULL,
+              updated_at    DATETIME     NOT NULL,
+              PRIMARY KEY (id),
+              KEY idx_status (status),
+              KEY idx_content_type (content_type),
+              KEY idx_date_publish (date_publish),
+              KEY idx_created_at (created_at),
+              KEY idx_ig_media_id (ig_media_id)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+        """)
+
+    # -- conversion ----------------------------------------------------------
 
     @staticmethod
-    def _oid(item_id):
-        from bson import ObjectId
-        from bson.errors import InvalidId
-
-        try:
-            return ObjectId(item_id)
-        except (InvalidId, TypeError):
+    def _out(row):
+        if not row:
             return None
+        item = {"id": str(row["id"])}
+        for column in COLUMNS:
+            value = row.get(column)
+            if column in DATE_FIELDS:
+                item[column] = _from_date(value)
+            elif column in DT_FIELDS:
+                item[column] = _from_dt(value)
+            else:
+                item[column] = "" if value is None else value
+        return item
+
+    @staticmethod
+    def _encode(column, value):
+        if column in DATE_FIELDS:
+            return _to_date(value)
+        if column in DT_FIELDS:
+            return _to_dt(value)
+        return value
+
+    # -- reads ---------------------------------------------------------------
 
     def list(self, query):
-        mongo_query = {}
+        where, params = [], []
         if query.get("status"):
-            mongo_query["status"] = query["status"]
+            where.append("status = %s")
+            params.append(query["status"])
         if query.get("content_type"):
-            mongo_query["content_type"] = query["content_type"]
+            where.append("content_type = %s")
+            params.append(query["content_type"])
         if query.get("search"):
-            rx = {"$regex": re.escape(query["search"]), "$options": "i"}
-            mongo_query["$or"] = [
-                {"title": rx},
-                {"notes": rx},
-                {"caption": rx},
-                {"owner": rx},
-            ]
-        cursor = self._col.find(mongo_query).sort(
-            [("date_publish", 1), ("created_at", 1)]
+            needle = f"%{query['search'].translate(LIKE_ESCAPE)}%"
+            where.append(
+                "(title LIKE %s ESCAPE '\\\\' OR notes LIKE %s ESCAPE '\\\\' "
+                "OR caption LIKE %s ESCAPE '\\\\' OR owner LIKE %s ESCAPE '\\\\')"
+            )
+            params.extend([needle] * 4)
+
+        clause = f"WHERE {' AND '.join(where)}" if where else ""
+        rows = self._query(
+            # date_publish IS NULL first in the sort keeps undated items last,
+            # since MySQL would otherwise sort NULL to the top.
+            f"SELECT * FROM `{self._table}` {clause} "
+            f"ORDER BY (date_publish IS NULL), date_publish, created_at, id",
+            tuple(params),
+            fetch="all",
         )
-        return [self._out(d) for d in cursor]
+        return [self._out(r) for r in rows]
 
     def get(self, item_id):
-        oid = self._oid(item_id)
-        return self._out(self._col.find_one({"_id": oid})) if oid else None
-
-    def create(self, data):
-        doc = dict(data)
-        doc["created_at"] = doc["updated_at"] = now_iso()
-        doc.update(ig_media_id="", ig_permalink="", publish_error="", published_at="")
-        result = self._col.insert_one(doc)
-        return self._out(self._col.find_one({"_id": result.inserted_id}))
-
-    def update(self, item_id, data):
-        oid = self._oid(item_id)
-        if not oid:
+        if not str(item_id).isdigit():
             return None
-        patch = dict(data)
-        patch["updated_at"] = now_iso()
-        self._col.update_one({"_id": oid}, {"$set": patch})
-        return self._out(self._col.find_one({"_id": oid}))
-
-    def delete(self, item_id):
-        oid = self._oid(item_id)
-        if not oid:
-            return False
-        return self._col.delete_one({"_id": oid}).deleted_count == 1
+        row = self._query(
+            f"SELECT * FROM `{self._table}` WHERE id = %s", (int(item_id),), fetch="one"
+        )
+        return self._out(row)
 
     def count_published_since(self, iso_ts):
-        return self._col.count_documents({"published_at": {"$gte": iso_ts}})
+        row = self._query(
+            f"SELECT COUNT(*) AS n FROM `{self._table}` WHERE published_at >= %s",
+            (_to_dt(iso_ts),),
+            fetch="one",
+        )
+        return int(row["n"]) if row else 0
+
+    # -- writes --------------------------------------------------------------
+
+    def create(self, data):
+        now = _to_dt(now_iso())
+        values = {column: "" for column in COLUMNS}
+        values.update(data)
+        values.update(
+            ig_media_id="", ig_permalink="", publish_error="", published_at="",
+            created_at=now, updated_at=now,
+        )
+        payload = {c: self._encode(c, values[c]) for c in COLUMNS}
+        placeholders = ", ".join(["%s"] * len(COLUMNS))
+        columns = ", ".join(f"`{c}`" for c in COLUMNS)
+        _, new_id = self._query(
+            f"INSERT INTO `{self._table}` ({columns}) VALUES ({placeholders})",
+            tuple(payload[c] for c in COLUMNS),
+        )
+        return self.get(new_id)
+
+    def update(self, item_id, data):
+        if not str(item_id).isdigit():
+            return None
+        patch = {c: v for c, v in data.items() if c in COLUMNS}
+        patch["updated_at"] = _to_dt(now_iso())
+        assignments = ", ".join(f"`{c}` = %s" for c in patch)
+        params = [self._encode(c, v) for c, v in patch.items()] + [int(item_id)]
+        rows, _ = self._query(
+            f"UPDATE `{self._table}` SET {assignments} WHERE id = %s", tuple(params)
+        )
+        return self.get(item_id)
+
+    def delete(self, item_id):
+        if not str(item_id).isdigit():
+            return False
+        rows, _ = self._query(
+            f"DELETE FROM `{self._table}` WHERE id = %s", (int(item_id),)
+        )
+        return rows == 1
 
 
 def build_store():
     """Pick a backend. Returns (store, note) where note explains any fallback."""
-    if not config.mongo_configured():
+    if not config.mysql_configured():
         return MemoryStore(), (
-            "MONGODB_URI is not set - running on a volatile in-memory store. "
-            "Nothing you enter is saved."
+            "MySQL is not configured - running on a volatile in-memory store. "
+            "Nothing you enter is saved. Set MYSQL_HOST, MYSQL_USER, "
+            "MYSQL_PASSWORD and MYSQL_DB in .env."
         )
-    store = MongoStore(config.MONGODB_URI, config.MONGODB_DB, config.MONGODB_COLLECTION)
+    store = MySQLStore(
+        host=config.MYSQL_HOST,
+        port=config.MYSQL_PORT,
+        user=config.MYSQL_USER,
+        password=config.MYSQL_PASSWORD,
+        database=config.MYSQL_DB,
+        table=config.MYSQL_TABLE,
+        connect_timeout=config.MYSQL_CONNECT_TIMEOUT,
+    )
     store.ping()
     return store, ""

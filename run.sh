@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Creates the venv on first run, installs pymongo, starts the server.
+# Creates the venv on first run, installs PyMySQL, starts the server.
 set -euo pipefail
 cd "$(dirname "$0")"
 
