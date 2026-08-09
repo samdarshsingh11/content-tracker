@@ -1,0 +1,11 @@
+# Secrets — never commit. Contains the MongoDB URI and Instagram access token.
+.env
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+
+# macOS
+.DS_Store
