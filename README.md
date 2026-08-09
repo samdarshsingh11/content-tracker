@@ -13,6 +13,15 @@ connector built on the Meta Graph API.
 Backend is Python (standard library + `PyMySQL`). Frontend is plain HTML/CSS/JS —
 no build step, no bundler. There is no Node.js on this machine and none is needed.
 
+> **Not deployable via a static-site / Node.js Git importer (Hostinger's included).**
+> `package.json` exists here only so those importers stop flagging it as missing —
+> there is nothing to `npm install`. If you use one of those flows, it will serve
+> `web/` and nothing else: the page loads, but every feature — saving items,
+> stats, Instagram publishing — depends on `server.py`, which is a Python process
+> those importers don't run. To actually deploy this, run `server.py` somewhere
+> that keeps a long-lived process (a VPS, or any Python host) pointed at your
+> MySQL credentials in `.env`; `web/` alone is not a working deployment.
+
 ---
 
 ## Quick start

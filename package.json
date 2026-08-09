@@ -1,0 +1,17 @@
+{
+  "name": "content-tracker",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Reels/Posts content pipeline tracker with a direct Instagram publishing connector built on the Meta Graph API.",
+  "homepage": "https://github.com/samdarshsingh11/content-tracker#readme",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/samdarshsingh11/content-tracker.git"
+  },
+  "scripts": {
+    "build": "echo 'No build step: web/ is plain HTML/CSS/JS.' && exit 0"
+  },
+  "engines": {
+    "node": ">=0"
+  }
+}
