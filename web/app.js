@@ -217,7 +217,7 @@ function wireBoardDnd() {
       // Dragging to Published only records the status. It never posts to
       // Instagram — that has to be a deliberate click in the publish panel.
       try {
-        await api(`/api/items/${id}`, { method: "PATCH", body: JSON.stringify({ status }) });
+        await api(`api/items/${id}`, { method: "PATCH", body: JSON.stringify({ status }) });
         if (status === "published" && !item.ig_media_id) {
           toast("Marked as published in the tracker. Nothing was posted to Instagram.", "ok");
         }
@@ -432,7 +432,7 @@ async function startPublish(item) {
 
   let job;
   try {
-    job = await api(`/api/items/${item.id}/publish`, { method: "POST", body: "{}" });
+    job = await api(`api/items/${item.id}/publish`, { method: "POST", body: "{}" });
   } catch (err) {
     return showPublishError(err.message, err.payload);
   }
@@ -440,7 +440,7 @@ async function startPublish(item) {
   state.pollTimer = setInterval(async () => {
     let status;
     try {
-      status = await api(`/api/jobs/${job.job_id}`);
+      status = await api(`api/jobs/${job.job_id}`);
     } catch {
       return; // transient; keep polling
     }
@@ -484,7 +484,7 @@ function showPublishError(message, payload) {
 /* --------------------------------------------------------- connection card */
 
 async function loadConnection() {
-  const config = await api("/api/config");
+  const config = await api("api/config");
   state.config = config;
 
   $("#brandBackend").textContent =
@@ -513,7 +513,7 @@ async function loadConnection() {
   badge.textContent = "checking";
   badge.className = "conn__badge";
   try {
-    const { account, quota } = await api("/api/meta/account");
+    const { account, quota } = await api("api/meta/account");
     state.config.ig_username = account.username;
     badge.textContent = "connected";
     badge.className = "conn__badge is-live";
@@ -550,8 +550,8 @@ async function refresh() {
   Object.entries(state.filters).forEach(([key, value]) => { if (value) params.set(key, value); });
 
   const [{ items }, stats] = await Promise.all([
-    api(`/api/items?${params}`),
-    api("/api/stats"),
+    api(`api/items?${params}`),
+    api("api/stats"),
   ]);
 
   state.items = items;
@@ -647,9 +647,9 @@ function wire() {
     save.textContent = "Saving…";
     try {
       if (state.editing) {
-        await api(`/api/items/${state.editing.id}`, { method: "PATCH", body: JSON.stringify(payload) });
+        await api(`api/items/${state.editing.id}`, { method: "PATCH", body: JSON.stringify(payload) });
       } else {
-        await api("/api/items", { method: "POST", body: JSON.stringify(payload) });
+        await api("api/items", { method: "POST", body: JSON.stringify(payload) });
       }
       await refresh();
       closeDrawer();
@@ -675,7 +675,7 @@ function wire() {
     $("#delCancel").addEventListener("click", closeModal);
     $("#delGo").addEventListener("click", async () => {
       try {
-        await api(`/api/items/${item.id}`, { method: "DELETE" });
+        await api(`api/items/${item.id}`, { method: "DELETE" });
         closeModal();
         closeDrawer();
         await refresh();
